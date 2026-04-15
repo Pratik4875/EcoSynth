@@ -15,9 +15,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final DatabaseReference _db = FirebaseDatabase.instance.ref();
   final List<StreamSubscription<dynamic>> _subs = [];
 
-  // Telemetry
+  // Telemetry — displayed values (EMA-smoothed)
   int _batteryPercent = 0;
   double _voltage = 0.0;
+
+  // ── EMA (Exponential Moving Average) smoothing ─────────────────────────────
+  // Removes ADC noise from the ESP8266 just like a smartphone battery meter.
+  // Formula: smoothed = alpha * rawReading + (1 - alpha) * previousSmoothed
+  // alpha=0.15 → 15% new data, 85% history → very stable display.
+  // Raise alpha (e.g. 0.3) if readings feel too slow to track real changes.
+  static const double _emaAlpha = 0.15;
+  double _emaPercent = -1.0; // -1 = uninitialized sentinel
+  double _emaVoltage  = -1.0; // -1 = uninitialized sentinel
 
   // Connection state — two separate signals:
   // _firebaseConnected: does the Flutter app have a live socket to Firebase?
@@ -68,7 +77,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         (event) {
           final v = event.snapshot.value;
           if (v != null && mounted) {
-            setState(() => _batteryPercent = (v as num).toInt().clamp(0, 100));
+            final rawPct = (v as num).toDouble().clamp(0.0, 100.0);
+            // First reading: seed the EMA. Subsequent: blend with history.
+            _emaPercent = _emaPercent < 0
+                ? rawPct
+                : (_emaAlpha * rawPct + (1 - _emaAlpha) * _emaPercent);
+            setState(() => _batteryPercent = _emaPercent.round().clamp(0, 100));
             _resetEspWatchdog(); // ESP just sent data → mark as live
           }
         },
@@ -81,7 +95,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         (event) {
           final v = event.snapshot.value;
           if (v != null && mounted) {
-            setState(() => _voltage = (v as num).toDouble());
+            final rawV = (v as num).toDouble();
+            // First reading: seed the EMA. Subsequent: blend with history.
+            _emaVoltage = _emaVoltage < 0
+                ? rawV
+                : (_emaAlpha * rawV + (1 - _emaAlpha) * _emaVoltage);
+            setState(() => _voltage = _emaVoltage);
             _resetEspWatchdog(); // ESP just sent data → mark as live
           }
         },
@@ -94,7 +113,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         (event) {
           final v = event.snapshot.value;
           if (v != null && !_writing && mounted) {
-            setState(() => _charger = v as bool);
+            // Relay is ACTIVE-LOW: Firebase false → relay energised → charging ON
+            // Invert so _charger=true always means "charger is ON" in the UI.
+            setState(() => _charger = !(v as bool));
           }
         },
         onError: (e) => _handleStreamError('control/charger_relay', e),
@@ -170,7 +191,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       if (newValue && (device == 'pump' || device == 'mist')) {
         if (_charger) {
-          await _db.child('control/charger_relay').set(false);
+          // Active-low: write true to Firebase = relay off = charger disabled
+          await _db.child('control/charger_relay').set(true);
           if (mounted) setState(() => _charger = false);
         }
       } else if (newValue && device == 'charger_relay') {
@@ -185,7 +207,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
 
       // ── Write the target node ─────────────────────────────────────────────
-      await _db.child('control/$device').set(newValue);
+      // Charger relay is active-low — write the inverted value to Firebase.
+      // Pump and Mist are active-high — write directly.
+      final fbValue = device == 'charger_relay' ? !newValue : newValue;
+      await _db.child('control/$device').set(fbValue);
       if (mounted) {
         setState(() {
           if (device == 'charger_relay') _charger = newValue;
