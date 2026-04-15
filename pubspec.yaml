@@ -1,7 +1,7 @@
 name: smart_garden_iot
 description: "EcoSynth — Real-time IoT Control Dashboard for ESP8266 Smart Irrigation Systems. Built with Flutter + Firebase Realtime Database."
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: '>=3.5.0 <4.0.0'
